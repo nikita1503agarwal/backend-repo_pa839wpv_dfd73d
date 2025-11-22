@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -40,15 +41,17 @@ def test_database():
             response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
             response["connection_status"] = "Connected"
             try:
+                # Lightweight ping
+                db.command("ping")
                 collections = db.list_collection_names()
                 response["collections"] = collections[:10]
                 response["database"] = "✅ Connected & Working"
             except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
+                response["database"] = f"⚠️  Connected but Error: {str(e)[:200]}"
         else:
             response["database"] = "⚠️  Available but not initialized"
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
+        response["database"] = f"❌ Error: {str(e)[:200]}"
 
     # Re-check envs
     response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
@@ -64,6 +67,12 @@ class MindmapCreate(BaseModel):
 class MindmapSave(BaseModel):
     title: str
     nodes: List[MindmapNode]
+
+def _to_object_id(mindmap_id: str) -> ObjectId:
+    try:
+        return ObjectId(mindmap_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid mindmap id")
 
 @app.post("/api/mindmaps", response_model=dict)
 def create_mindmap(payload: MindmapCreate):
@@ -92,10 +101,13 @@ def list_mindmaps():
 @app.get("/api/mindmaps/{mindmap_id}", response_model=dict)
 def get_mindmap(mindmap_id: str):
     try:
-        doc = db["mindmap"].find_one({"_id": ObjectId(mindmap_id)})
+        oid = _to_object_id(mindmap_id)
+        doc = db["mindmap"].find_one({"_id": oid})
         if not doc:
             raise HTTPException(status_code=404, detail="Mindmap not found")
         return {"id": str(doc["_id"]), "title": doc.get("title", "Untitled"), "nodes": doc.get("nodes", [])}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -104,13 +116,14 @@ def save_mindmap(mindmap_id: str, payload: MindmapSave):
     try:
         # Validate structure with schema
         _ = Mindmap(title=payload.title, nodes=payload.nodes)
+        oid = _to_object_id(mindmap_id)
         res = db["mindmap"].update_one(
-            {"_id": ObjectId(mindmap_id)},
-            {"$set": {"title": payload.title, "nodes": [n.model_dump() if hasattr(n, 'model_dump') else dict(n) for n in payload.nodes], "updated_at": None}}
+            {"_id": oid},
+            {"$set": {"title": payload.title, "nodes": [n.model_dump() if hasattr(n, 'model_dump') else dict(n) for n in payload.nodes], "updated_at": datetime.now(timezone.utc)}}
         )
         if res.matched_count == 0:
             raise HTTPException(status_code=404, detail="Mindmap not found")
-        doc = db["mindmap"].find_one({"_id": ObjectId(mindmap_id)})
+        doc = db["mindmap"].find_one({"_id": oid})
         return {"id": str(doc["_id"]), "title": doc.get("title", "Untitled"), "nodes": doc.get("nodes", [])}
     except HTTPException:
         raise
